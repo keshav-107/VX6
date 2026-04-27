@@ -35,3 +35,43 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected peer address %q", loaded.Peers["beta"].Address)
 	}
 }
+
+func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
+	t.Parallel()
+
+	path, err := RuntimePIDPath("/tmp/vx6/config.json")
+	if err != nil {
+		t.Fatalf("runtime pid path: %v", err)
+	}
+	if path != "/tmp/vx6/node.pid" {
+		t.Fatalf("unexpected pid path %q", path)
+	}
+}
+
+func TestDefaultPathsUseHomeDirectory(t *testing.T) {
+	t.Setenv("HOME", "/tmp/vx6-home")
+
+	configPath, err := DefaultPath()
+	if err != nil {
+		t.Fatalf("default config path: %v", err)
+	}
+	if configPath != "/tmp/vx6-home/.config/vx6/config.json" {
+		t.Fatalf("unexpected config path %q", configPath)
+	}
+
+	dataDir, err := DefaultDataDir()
+	if err != nil {
+		t.Fatalf("default data dir: %v", err)
+	}
+	if dataDir != "/tmp/vx6-home/.local/share/vx6" {
+		t.Fatalf("unexpected data dir %q", dataDir)
+	}
+
+	downloadDir, err := DefaultDownloadDir()
+	if err != nil {
+		t.Fatalf("default download dir: %v", err)
+	}
+	if downloadDir != "/tmp/vx6-home/Downloads" {
+		t.Fatalf("unexpected download dir %q", downloadDir)
+	}
+}

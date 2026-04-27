@@ -18,6 +18,8 @@ import (
 
 const maxMessageSize = 64 * 1024
 
+const roundTripTimeout = 2 * time.Second
+
 type Registry struct {
 	mu            sync.RWMutex
 	path          string
@@ -108,8 +110,7 @@ func (r *Registry) handlePublish(conn net.Conn, rec record.EndpointRecord) error
 		}
 	}
 
-	r.byName[rec.NodeName] = rec
-	r.byNode[rec.NodeID] = rec
+	r.upsertEndpointLocked(rec)
 	if err := r.saveLocked(); err != nil {
 		return writeResponse(conn, response{Error: err.Error()})
 	}
@@ -130,7 +131,7 @@ func (r *Registry) handlePublishService(conn net.Conn, rec record.ServiceRecord)
 		return writeResponse(conn, response{Error: err.Error()})
 	}
 
-	fullName := record.FullServiceName(rec.NodeName, rec.ServiceName)
+	fullName := record.ServiceLookupKey(rec)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -257,8 +258,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 				continue
 			}
 		}
-		r.byName[rec.NodeName] = rec
-		r.byNode[rec.NodeID] = rec
+		r.upsertEndpointLocked(rec)
 		changed = true
 	}
 
@@ -266,7 +266,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		fullName := record.FullServiceName(rec.NodeName, rec.ServiceName)
+		fullName := record.ServiceLookupKey(rec)
 		existing, ok := r.serviceByName[fullName]
 		if ok {
 			oldIssuedAt, _ := time.Parse(time.RFC3339, existing.IssuedAt)
@@ -302,14 +302,13 @@ func (r *Registry) load() error {
 		if err := record.VerifyEndpointRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		r.byName[rec.NodeName] = rec
-		r.byNode[rec.NodeID] = rec
+		r.upsertEndpointLocked(rec)
 	}
 	for _, rec := range snapshot.ServiceRecords {
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		r.serviceByName[record.FullServiceName(rec.NodeName, rec.ServiceName)] = rec
+		r.serviceByName[record.ServiceLookupKey(rec)] = rec
 	}
 	return nil
 }
@@ -353,6 +352,14 @@ func (r *Registry) saveLocked() error {
 		return fmt.Errorf("write registry: %w", err)
 	}
 	return nil
+}
+
+func (r *Registry) upsertEndpointLocked(rec record.EndpointRecord) {
+	if existing, ok := r.byNode[rec.NodeID]; ok && existing.NodeName != "" && existing.NodeName != rec.NodeName {
+		delete(r.byName, existing.NodeName)
+	}
+	r.byName[rec.NodeName] = rec
+	r.byNode[rec.NodeID] = rec
 }
 
 func Publish(ctx context.Context, address string, rec record.EndpointRecord) (record.EndpointRecord, error) {
@@ -434,12 +441,16 @@ func roundTrip(ctx context.Context, address string, req request) (response, erro
 		return response{}, err
 	}
 
+	dialCtx, cancel := context.WithTimeout(ctx, roundTripTimeout)
+	defer cancel()
+
 	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", address)
+	conn, err := dialer.DialContext(dialCtx, "tcp6", address)
 	if err != nil {
 		return response{}, fmt.Errorf("dial discovery endpoint %s: %w", address, err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(roundTripTimeout))
 
 	if err := proto.WriteHeader(conn, proto.KindDiscoveryReq); err != nil {
 		return response{}, err
